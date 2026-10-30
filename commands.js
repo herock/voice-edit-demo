@@ -319,6 +319,34 @@
     }
   }
 
+
+  // ---------- 拆字说法：弓长张、立早章、木子李…… ----------
+  // 识别常把最后一个字听成同音字（如「弓长章」），所以最后一个字按读音比对
+  var CHAIZI = { '弓长': '张', '立早': '章', '木子': '李', '十八子': '李', '口天': '吴', '耳东': '陈', '古月': '胡',
+    '双木': '林', '双口': '吕', '言午': '许', '人可': '何', '禾口': '程', '走肖': '赵', '文刀': '刘', '草头': '黄',
+    '女生': '姓', '子小': '孙', '日月': '明', '三水': '淼', '王白': '皇', '金字旁的': '', '提手旁的': '' };
+  function resolveChaizi(s, pinyinFn) {
+    if (!s) return { text: s, hits: [] };
+    var hits = [];
+    var keys = Object.keys(CHAIZI).filter(function (k) { return CHAIZI[k]; }).sort(function (a, b) { return b.length - a.length; });
+    var out = s;
+    keys.forEach(function (k) {
+      var target = CHAIZI[k], idx = 0;
+      while ((idx = out.indexOf(k, idx)) >= 0) {
+        var c = out.charAt(idx + k.length);
+        var ok = c === target || (c && pinyinFn && (readings(c, pinyinFn) || []).some(function (r) { return (readings(target, pinyinFn) || []).indexOf(r) >= 0; }));
+        if (ok) { hits.push(k + c + '→' + target); out = out.slice(0, idx) + target + out.slice(idx + k.length + 1); idx += 1; }
+        else idx += k.length;
+      }
+    });
+    return { text: out, hits: hits };
+  }
+  function chaiziCmd(cmd, pinyinFn) {
+    var c = Object.assign({}, cmd), hits = [];
+    ['x', 'y'].forEach(function (f) { if (typeof c[f] === 'string') { var r = resolveChaizi(c[f], pinyinFn); c[f] = r.text; hits = hits.concat(r.hits); } });
+    return { cmd: c, hits: hits };
+  }
+
   /**
    * 执行一条已解析的口令（不含撤销/选择，这两种由 Editor 处理）。
    * state: {text, selection: {start,end}|null}
@@ -330,6 +358,13 @@
     opts = opts || {};
     var text = state.text || '';
     var sel = state.selection && state.selection.end > state.selection.start ? state.selection : null;
+    var cz = chaiziCmd(cmd, opts.pinyin); cmd = cz.cmd;
+    var r0 = applyCommandInner(text, sel, cmd, opts);
+    if (cz.hits.length && r0.status !== 'error') r0.note = (r0.note ? r0.note + '；' : '') + '按拆字理解：' + cz.hits.join('，');
+    if (cz.hits.length && r0.status === 'error') r0.message += '（已按拆字理解：' + cz.hits.join('，') + '）';
+    return r0;
+  }
+  function applyCommandInner(text, sel, cmd, opts) {
     switch (cmd.type) {
       case 'append': {
         var t = text + cmd.text;
