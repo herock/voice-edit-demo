@@ -204,7 +204,7 @@
     var b = $('recBtn');
     b.classList.toggle('on', listening);
     $('recIcon').textContent = listening ? '■' : '●';
-    $('recLabel').textContent = listening ? (sessionMode === 'edit' ? '正在听口令…点一下结束' : '正在听写…点一下结束')
+    $('recLabel').textContent = listening ? (sessionMode === 'edit' ? '正在听口令…说完会自动执行，也可点一下' : '正在听写…点一下结束')
                                           : (mode === 'edit' ? '点一下说改字口令' : '点一下开始听写');
     if (!SR) { b.disabled = true; $('recLabel').textContent = '此浏览器不支持语音识别'; }
   }
@@ -220,7 +220,7 @@
       rec.interimResults = true;
       rec.maxAlternatives = 1;
     } catch (e) { showResult(null, { status: 'error', message: '无法创建语音识别：' + e.message }); return; }
-    sessionMode = mode; transcript = ''; ended = false;
+    sessionMode = mode; transcript = ''; ended = false; silenceTimer = null;
     rec.onresult = function (e) {
       if (id !== sessionId) return;
       var parts = [];
@@ -232,9 +232,19 @@
         if (joined && t.indexOf(joined) === 0) { parts = [t]; continue; }       // 累积型结果
         parts.push(t);
       }
-      transcript = parts.join('');
+      var next = parts.join('');
+      var anyFinal = false;
+      for (var j = 0; j < e.results.length; j++) if (e.results[j].isFinal) anyFinal = true;
+      // iOS 有时在结束前推一个空结果，别让它把已识别的内容清掉
+      if (!next.trim()) return;
+      var changed = next !== transcript;
+      transcript = next;
       live(transcript);
-      if (sessionMode === 'edit') { clearTimeout(silenceTimer); silenceTimer = setTimeout(stopRec, 1600); } // 口令说完停 1.6 秒自动结束
+      if (sessionMode === 'edit') {
+        // iOS 会在静音时重复推送相同结果：只有内容变化才重新计时，否则计时照常走完
+        if (changed || !silenceTimer) { clearTimeout(silenceTimer); silenceTimer = setTimeout(stopRec, 1200); }
+        if (anyFinal) { clearTimeout(silenceTimer); silenceTimer = setTimeout(stopRec, 300); }
+      }
     };
     rec.onerror = function (e) {
       if (id !== sessionId) return;
@@ -250,7 +260,7 @@
   }
   function stopRec() {
     if (!rec || ended) return;
-    clearTimeout(silenceTimer);
+    clearTimeout(silenceTimer); silenceTimer = null;
     try { rec.stop(); } catch (e) {}
     var id = sessionId, r = rec;
     // iOS 上偶尔不触发 onend：1.5 秒后强制结束
