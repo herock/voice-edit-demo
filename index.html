@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#1565c0">
+<title>语音改字 Demo</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22%3E%3Ctext y=%22.9em%22 font-size=%2290%22%3E🎙️%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="mode-dictate">
+<main>
+  <header><h1>语音改字 Demo</h1><span class="ver">听写 / 改字 双模式</span></header>
+
+  <div id="modeSwitch" class="mode-switch" role="radiogroup" aria-label="模式">
+    <button id="modeDictate" class="mode-btn dictate active" role="radio" aria-checked="true">🎙️ 听写<small>说的话写进正文</small></button>
+    <button id="modeEdit" class="mode-btn edit" role="radio" aria-checked="false">✏️ 改字<small>说的话当口令执行</small></button>
+  </div>
+
+  <div id="banner" class="banner" hidden></div>
+
+  <div class="editor-wrap">
+    <div id="backdrop" class="backdrop" aria-hidden="true"></div>
+    <textarea id="editor" class="editor" placeholder="正文会出现在这里。可以直接打字编辑，也可以选中一段文字后切到「改字」说“改成…”或“删掉”。" spellcheck="false" autocapitalize="off" autocomplete="off"></textarea>
+  </div>
+  <div id="selChip" class="sel-chip" hidden><span id="selText"></span><button id="selClear" aria-label="取消选区">✕</button></div>
+
+  <div id="choice" class="choice" hidden>
+    <div id="choiceTitle" class="choice-title"></div>
+    <div id="choiceBtns" class="choice-btns"></div>
+  </div>
+
+  <div id="live" class="live" hidden><span class="dot"></span><span id="liveText">正在听…</span></div>
+
+  <button id="recBtn" class="rec-btn"><span id="recIcon">●</span> <span id="recLabel">点一下开始说话</span></button>
+
+  <div id="result" class="result" hidden></div>
+
+  <div class="actions">
+    <button id="undoBtn">↩︎ 撤销</button>
+    <button id="copyBtn">📋 复制全文</button>
+    <button id="clearBtn">🗑 清空</button>
+  </div>
+
+  <section class="sim">
+    <label for="simInput">⌨️ 打字模拟语音（按当前模式处理，和说出来效果一样）</label>
+    <div class="sim-row">
+      <input id="simInput" type="text" enterkeyhint="send" placeholder="例：把张三改成章三" autocomplete="off">
+      <button id="simBtn">提交</button>
+    </div>
+    <div class="chips" id="chips"></div>
+    <button id="sampleBtn" class="link-btn">载入示例正文</button>
+  </section>
+
+  <section class="log">
+    <h2>操作日志</h2>
+    <ol id="log"></ol>
+  </section>
+
+  <section class="help">
+    <h2>口令说明（改字模式）</h2>
+    <ul>
+      <li><b>替换</b>：把 X 改成 Y ／ 把 X 换成 Y ／ 把 X 替换成 Y（说“把所有 X 改成 Y”或“X 都改成 Y”改全部）</li>
+      <li><b>删除</b>：删掉 X ／ 删除 X ／ 去掉 X ／ 把 X 删掉</li>
+      <li><b>删句</b>：删掉最后一句 ／ 删掉上一句 ／ 删掉最后两句 ／ 删掉最后一个字</li>
+      <li><b>插入</b>：在 X 后面加上 Y ／ 在 X 前面插入 Y ／ 在开头（末尾）加上 Y</li>
+      <li><b>标点</b>：加个句号 ／ 逗号 ／ 问号 ／ 感叹号 ／ 换行（都加在末尾）</li>
+      <li><b>撤销</b>：撤销 ／ 撤销两步（可以连续撤销）</li>
+      <li><b>选区</b>：先在正文里选中一段，再说“改成 Y”或“删掉”</li>
+      <li><b>多处匹配</b>：正文出现编号 ①②③，点按钮或说“第二个”“全部”“取消”</li>
+      <li><b>同音字</b>：找不到原词时按拼音找读音相同（再不行找平翘舌、前后鼻音相近）的词，结果会标明“按读音匹配”</li>
+      <li>听不懂的话会显示原文和“没听懂”，正文不会动。</li>
+    </ul>
+    <h2>iPhone 使用提示</h2>
+    <ul>
+      <li>请用 <b>Safari</b> 打开（微信内置浏览器、添加到主屏幕的网页版不能识别语音）。</li>
+      <li>如提示“语音识别不可用”：设置 › 通用 › 键盘 › 打开「启用听写」（或打开 Siri）。</li>
+      <li>第一次点录音会弹两次授权（麦克风、语音识别），都选允许。</li>
+      <li>语音识别由 iOS 系统提供，可能会联网发给 Apple 处理；本页本身没有服务器，正文只存在本机浏览器里。</li>
+    </ul>
+  </section>
+  <footer>拼音匹配使用 <a href="https://github.com/zh-lx/pinyin-pro" target="_blank" rel="noopener">pinyin-pro</a>（MIT）。</footer>
+</main>
+<script src="vendor/pinyin-pro.min.js"></script>
+<script src="commands.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
