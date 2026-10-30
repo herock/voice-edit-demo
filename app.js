@@ -61,7 +61,6 @@
 
   // ---------- 模式 ----------
   function setMode(m) {
-    if (listening) stopRec();
     mode = m; store.set(KEY_MODE, m);
     document.body.className = 'mode-' + m;
     $('modeDictate').classList.toggle('active', m === 'dictate');
@@ -189,102 +188,207 @@
   };
 
   // ---------- 语音识别 ----------
+  // iOS 27 WebKit 回归（bugs.webkit.org/show_bug.cgi?id=321436）：同一页面第二次起的识别会“聋掉”
+  // （start/audiostart 都触发、麦克风灯亮，但没有任何结果和错误）。
+  // 所以整页只在第一次点击时 start() 一次（continuous），之后一直开着；
+  // 大按钮只用来标记“段”的开始/结束：第一下开始录入，第二下结束并执行。绝不自动执行。
   var SR = window.SpeechRecognition || window.webkitSpeechRecognition;
-  var rec = null, listening = false, sessionMode = 'dictate', transcript = '', sessionId = 0, ended = true, prefix = '', userStopped = false, paused = false;
-  var silenceTimer = null, maxTimer = null, stopGuard = null;
+  var rec = null, recCount = 0, alive = false, everStarted = false, starting = false;
+  var base = '', cur = '';                 // 累计转写 = 之前实例留下的 base + 当前实例的 cur
+  var capturing = false, processing = false, segMode = 'dictate', segStart = 0, segSnap = '', segLastSeen = '', segBeganAt = 0;
+  var curRaw = [], curFinal = [], segIdx = 0, segTailLen = 0, segCarry = '';  // 按结果下标定位段起点（兜底用）
+  var lastResultAt = 0, deafTimer = null, graceTimer = null, sessionDied = false;
+  var GRACE_MS = 700, DEAF_MS = 6000;
   var ERRORS = {
     'not-allowed': '没有麦克风或语音识别权限。请在弹窗里选“允许”；如果之前拒绝过：点地址栏左侧「大小」图标 › 网站设置 › 麦克风 › 允许，或 设置 › Safari › 麦克风。',
     'service-not-allowed': '系统语音识别不可用。请到 设置 › 通用 › 键盘，打开「启用听写」（或打开 Siri），然后刷新重试。也可能是在微信等 App 内置浏览器里，请改用 Safari。',
-    'no-speech': '没听到说话声，请靠近一点再试。',
+    'no-speech': '没听到说话声。',
     'audio-capture': '麦克风用不了（可能正被通话或其他 App 占用）。',
     'network': '网络出错：iOS 语音识别可能需要联网。',
     'language-not-supported': '当前系统不支持中文（zh-CN）识别。'
   };
+
+  // 调试行：最近的识别事件 + 相对时间
+  var dbgT0 = 0, dbgEvents = [];
+  function dbg(ev) {
+    var t = Date.now(); if (!dbgT0) dbgT0 = t;
+    dbgEvents.push('+' + ((t - dbgT0) / 1000).toFixed(1) + 's ' + ev);
+    if (dbgEvents.length > 40) dbgEvents.shift();
+    var el = $('dbgText'); if (el) el.textContent = dbgEvents.slice(-14).join('  ·  ');
+    var s = $('dbgSum'); if (s) s.textContent = '识别事件（实例 ' + recCount + '，' + (alive ? '运行中' : '未运行') + '）：' + ev;
+  }
+  window.__vedDebug = function () { return { events: dbgEvents.slice(), recCount: recCount, alive: alive, capturing: capturing, transcript: base + cur }; };
+
+  function full() { return base + cur; }
+  // 从 event.results 拼出当前实例的完整转写（iOS 会推重复/累积型的结果，要去重）
+  function joinResults(results) {
+    var parts = [];
+    for (var i = 0; i < results.length; i++) {
+      var t = results[i] && results[i][0] ? results[i][0].transcript : '';
+      if (!t) continue;
+      var joined = parts.join('');
+      if (parts.length && parts[parts.length - 1] === t) continue;           // iOS 重复结果
+      if (joined && t.indexOf(joined) === 0) { parts = [t]; continue; }       // 累积型结果
+      parts.push(t);
+    }
+    return parts.join('');
+  }
+  // 取本段文字：正常情况下就是 full().slice(segStart)；
+  // 如果 iOS 改写了段开始之前的结果（转写变短/变样），改用“段开始时的结果下标”定位
+  function segmentText() {
+    var f = full(), t;
+    if (f.length >= segStart && f.slice(0, segStart) === segSnap) t = f.slice(segStart);
+    else {
+      var arr = curRaw.slice(segIdx);
+      if (arr.length && segTailLen) arr[0] = arr[0].slice(segTailLen);
+      t = joinResults(arr.map(function (x) { return [{ transcript: x }]; }));
+    }
+    t = (segCarry + t).replace(/^[\s，。、,.！？!?；;：:]+/, '');
+    return t;
+  }
+  function markSegStart() {
+    segSnap = full(); segStart = segSnap.length;
+    var n = curRaw.length;
+    if (n && !curFinal[n - 1]) { segIdx = n - 1; segTailLen = curRaw[n - 1].length; } else { segIdx = n; segTailLen = 0; }
+  }
+
   function updateRecBtn() {
-    var b = $('recBtn');
-    b.classList.toggle('on', listening);
-    $('recIcon').textContent = listening ? '■' : '●';
-    $('recLabel').textContent = listening ? (sessionMode === 'edit' ? '正在听口令…说完点一下执行' : '正在听写…点一下结束')
-                                          : (mode === 'edit' ? '点一下说改字口令' : '点一下开始听写');
+    var b = $('recBtn'), lbl;
+    b.classList.toggle('on', capturing && !processing);
+    $('recIcon').textContent = capturing ? '■' : '●';
+    if (processing) lbl = '正在处理…';
+    else if (capturing && !alive) lbl = '识别断了，点一下接着听';
+    else if (capturing) lbl = segMode === 'edit' ? '正在听口令…说完点一下执行' : '正在听…说完点一下';
+    else if (everStarted && !alive) lbl = '识别断了，点一下重新开始';
+    else lbl = '点一下开始说';
+    $('recLabel').textContent = lbl;
     if (!SR) { b.disabled = true; $('recLabel').textContent = '此浏览器不支持语音识别'; }
   }
-  function live(text) { $('live').hidden = !listening && !text; $('liveText').textContent = text || '正在听…'; }
+  function live() {
+    var box = $('live');
+    box.hidden = !capturing;
+    if (!capturing) return;
+    var t = segmentText() || segLastSeen;
+    $('liveText').textContent = t || (alive ? '正在听…' : '（识别断了）');
+    var showExec = !alive && !processing && !!(t && t.trim());
+    $('execNow').hidden = !showExec;
+  }
+  function setHint(msg) { var h = $('hint'); h.hidden = !msg; h.textContent = msg || ''; }
 
-  function startRec(isRestart) {
-    // 必须在点击事件里同步调用 start()（iOS 要求用户手势触发）
-    if (rec) { try { rec.onresult = rec.onend = rec.onerror = null; rec.abort(); } catch (e) {} } // 释放上一次的识别，避免 iOS 第二次起听不到
-    var id = ++sessionId;
-    try {
-      rec = new SR();
-      rec.lang = 'zh-CN';
-      rec.continuous = true;
-      rec.interimResults = true;
-      rec.maxAlternatives = 1;
-    } catch (e) { showResult(null, { status: 'error', message: '无法创建语音识别：' + e.message }); return; }
-    if (!isRestart) { sessionMode = mode; transcript = ''; prefix = ''; }
-    else { prefix = transcript; }
-    ended = false; silenceTimer = null; userStopped = false; paused = false;
-    rec.onresult = function (e) {
-      if (id !== sessionId) return;
-      var parts = [];
-      for (var i = 0; i < e.results.length; i++) {
-        var t = e.results[i][0] ? e.results[i][0].transcript : '';
-        var joined = parts.join('');
-        if (!t) continue;
-        if (parts.length && parts[parts.length - 1] === t) continue;           // iOS 重复结果
-        if (joined && t.indexOf(joined) === 0) { parts = [t]; continue; }       // 累积型结果
-        parts.push(t);
+  function createRec() {
+    var r = new SR();
+    r.lang = 'zh-CN';
+    r.continuous = true;
+    r.interimResults = true;
+    r.maxAlternatives = 1;
+    var id = ++recCount;
+    r.onstart = function () { dbg('#' + id + ' start'); };
+    r.onaudiostart = function () { dbg('#' + id + ' audiostart'); };
+    r.onspeechstart = function () { dbg('#' + id + ' speechstart'); };
+    r.onspeechend = function () { dbg('#' + id + ' speechend'); };
+    r.onnomatch = function () { dbg('#' + id + ' nomatch'); };
+    r.onresult = function (e) {
+      if (r !== rec) return;
+      lastResultAt = Date.now();
+      curRaw = []; curFinal = [];
+      for (var q = 0; q < e.results.length; q++) { curRaw.push(e.results[q] && e.results[q][0] ? e.results[q][0].transcript || '' : ''); curFinal.push(!!e.results[q].isFinal); }
+      var next = joinResults(e.results);
+      var fin = 0; for (var j = 0; j < e.results.length; j++) if (e.results[j].isFinal) fin++;
+      dbg('#' + id + ' result(' + e.results.length + (fin ? ',final' + fin : '') + ')');
+      if (!next.trim()) return;               // iOS 有时推空结果，别清掉已识别的内容
+      cur = next;
+      if (capturing) { setHint(''); var st = segmentText(); if (st) segLastSeen = st; live(); }
+    };
+    r.onerror = function (e) {
+      dbg('#' + id + ' error:' + e.error);
+      if (r !== rec || e.error === 'aborted') return;
+      var fatal = e.error === 'not-allowed' || e.error === 'service-not-allowed' || e.error === 'language-not-supported';
+      if (fatal) showBanner(ERRORS[e.error], true);
+      else addLog(capturing ? segMode : 'other', null, { status: 'error', message: (ERRORS[e.error] || ('语音识别出错：' + e.error)) + ' 识别断了，点一下重新开始' });
+    };
+    r.onend = function () {
+      dbg('#' + id + ' end');
+      if (r !== rec) return;
+      // iOS 自己结束了：不自动重开（不在用户手势里重开会更容易“聋”），等用户下一次点击
+      alive = false; sessionDied = true;
+      if (capturing) segCarry = segmentText();   // 段内已听到的保留，下个实例接着拼
+      base = full(); cur = ''; curRaw = []; curFinal = [];
+      if (capturing) markSegStart();
+      clearTimeout(deafTimer); setHint('');
+      updateRecBtn(); live();
+    };
+    return r;
+  }
+  // 在点击（用户手势）里同步调用 start()；失败的话按 300/1000/2000ms 重试一轮，不会无限循环
+  function startSession(onOk) {
+    if (starting) return;
+    if (rec) { var old = rec; rec = null; try { old.onresult = old.onend = old.onerror = null; old.abort(); } catch (e) {} }
+    base = full(); cur = ''; curRaw = []; curFinal = [];
+    if (capturing) markSegStart();
+    try { rec = createRec(); } catch (e) { showResult(null, { status: 'error', message: '无法创建语音识别：' + e.message }); return; }
+    var delays = [0, 300, 1000, 2000], k = 0, r = rec;
+    starting = true;
+    (function attempt() {
+      if (r !== rec) { starting = false; return; }
+      try {
+        r.start();
+        starting = false; alive = true; everStarted = true; sessionDied = false;
+        dbg('#' + recCount + ' start()调用' + (k ? '（第' + (k + 1) + '次）' : ''));
+        updateRecBtn();
+        if (onOk) onOk();
+      } catch (e) {
+        dbg('#' + recCount + ' start()失败:' + (e && e.name || e));
+        k++;
+        if (k < delays.length) setTimeout(attempt, delays[k]);
+        else { starting = false; alive = false; everStarted = true; updateRecBtn(); setHint('启动语音识别失败，请刷新页面后再试'); }
       }
-      var next = parts.join('');
-      var anyFinal = false;
-      for (var j = 0; j < e.results.length; j++) if (e.results[j].isFinal) anyFinal = true;
-      // iOS 有时在结束前推一个空结果，别让它把已识别的内容清掉
-      if (!next.trim()) return;
-      transcript = prefix + next;
-      live(transcript);
-      // 只在点击时生效：不做任何自动结束
-    };
-    rec.onerror = function (e) {
-      if (id !== sessionId) return;
-      if (e.error === 'aborted') return;
-      var msg = ERRORS[e.error] || ('语音识别出错：' + e.error);
-      showBanner(msg, e.error === 'not-allowed' || e.error === 'service-not-allowed');
-      addLog(sessionMode, null, { status: 'error', message: msg });
-    };
-    rec.onend = function () {
-      if (id !== sessionId || ended) return;
-      if (userStopped) { finish(id); return; }
-      // iOS 停顿久了会自己结束识别：不执行，先尝试接着听；接不上就暂停，等用户点击再执行
-      if (!startRec(true)) { paused = true; listening = false; updateRecBtn(); $('recLabel').textContent = '识别暂停了，点一下执行'; live(transcript); }
-    };
-    try { rec.start(); } catch (e) { if (isRestart) return false; showResult(null, { status: 'error', message: '启动语音识别失败：' + e.message }); return false; }
-    listening = true; updateRecBtn(); live(transcript);
-    if (!isRestart) { clearTimeout(maxTimer); maxTimer = setTimeout(stopRec, 120000); } // 单次最长 2 分钟
-    return true;
+    })();
   }
-  function stopRec() {
-    if (!rec || ended) return;
-    userStopped = true;
-    if (paused) { finish(sessionId); return; }
-    clearTimeout(silenceTimer); silenceTimer = null;
-    try { rec.stop(); } catch (e) {}
-    var id = sessionId, r = rec;
-    // iOS 上偶尔不触发 onend：1.5 秒后强制结束
-    clearTimeout(stopGuard);
-    // 点击后最多再等 0.8 秒收尾结果，然后无论 iOS 有没有回调都立即执行
-    listening = false; updateRecBtn(); $('recLabel').textContent = '正在处理…';
-    stopGuard = setTimeout(function () { if (!ended && id === sessionId) { try { r.abort(); } catch (e) {} finish(id); } }, 800);
+  function armDeaf() {
+    clearTimeout(deafTimer);
+    var began = segBeganAt;
+    deafTimer = setTimeout(function () {
+      if (capturing && alive && !processing && lastResultAt < began) setHint('好像没在听，可能是 iOS 的已知问题，刷新页面后再试');
+    }, DEAF_MS);
   }
-  function finish(id) {
-    if (id !== sessionId || ended) return;
-    ended = true; listening = false; paused = false;
-    clearTimeout(silenceTimer); clearTimeout(maxTimer); clearTimeout(stopGuard);
-    updateRecBtn(); $('live').hidden = true;
-    var t = transcript; transcript = '';
-    if (t.trim()) handleUtterance(t, sessionMode);
-    else { var r1 = { status: 'error', message: '这次没识别到文字，请再点一下重说' }; showResult(null, r1); addLog(sessionMode, null, r1); }
+  function beginSegment() {
+    capturing = true; segMode = mode;
+    segCarry = ''; markSegStart(); segLastSeen = ''; segBeganAt = Date.now();
+    dbg('tap:开始段(' + (segMode === 'edit' ? '改字' : '听写') + ')');
+    setHint(''); armDeaf(); updateRecBtn(); live();
   }
-  $('recBtn').onclick = function () { if (listening || paused) stopRec(); else startRec(false); };
+  function endSegment() {
+    processing = true; clearTimeout(deafTimer); setHint('');
+    dbg('tap:结束段');
+    updateRecBtn(); live();
+    // 留一点时间让最后几个字的结果到达，然后执行
+    graceTimer = setTimeout(function () {
+      var t = segmentText() || segLastSeen, m = segMode;
+      capturing = false; processing = false;
+      updateRecBtn(); live();
+      if (t.trim()) handleUtterance(t, m);
+      else { var r1 = { status: 'error', message: '这次没识别到文字，请再点一下重说' }; showResult(null, r1); addLog(m, null, r1); }
+    }, alive ? GRACE_MS : 0);
+  }
+  function onRecTap() {
+    if (!SR || processing || starting) return;
+    if (!capturing) {
+      if (!alive) {
+        // 首次：启动整页唯一的会话；之后只有 iOS 自己结束了才在这次点击里重开一个
+        startSession(beginSegment);
+        return;
+      }
+      beginSegment();
+    } else if (!alive) {
+      // 正在录入时识别断了：点一下在手势里重开，接着录这一段（已听到的保留）
+      startSession(function () {
+        segBeganAt = Date.now(); armDeaf(); updateRecBtn(); live();
+      });
+    } else endSegment();
+  }
+  $('recBtn').onclick = onRecTap;
+  $('execNow').onclick = function () { if (capturing && !alive && !processing) endSegment(); };
+  document.addEventListener('visibilitychange', function () { dbg(document.hidden ? 'page:hidden' : 'page:visible'); });
 
   // ---------- 兼容性检查 ----------
   function showBanner(html, isErr) { var b = $('banner'); b.hidden = false; b.className = 'banner' + (isErr ? ' err' : ''); b.innerHTML = html; }

@@ -6,7 +6,7 @@
 <meta name="theme-color" content="#1565c0">
 <title>语音改字 Demo</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22%3E%3Ctext y=%22.9em%22 font-size=%2290%22%3E🎙️%3C/text%3E%3C/svg%3E">
-<link rel="stylesheet" href="style.css">
+<link rel="stylesheet" href="style.css?v=4">
 </head>
 <body class="mode-dictate">
 <main>
@@ -30,9 +30,11 @@
     <div id="choiceBtns" class="choice-btns"></div>
   </div>
 
-  <div id="live" class="live" hidden><span class="dot"></span><span id="liveText">正在听…</span></div>
+  <div id="live" class="live" hidden><span class="dot"></span><span id="liveText">正在听…</span><button id="execNow" class="exec-now" hidden>直接执行</button></div>
+  <div id="hint" class="hint" hidden></div>
 
-  <button id="recBtn" class="rec-btn"><span id="recIcon">●</span> <span id="recLabel">点一下开始说话</span></button>
+  <button id="recBtn" class="rec-btn"><span id="recIcon">●</span> <span id="recLabel">点一下开始说</span></button>
+  <details id="dbg" class="dbg"><summary id="dbgSum">识别事件（调试用，出问题时截图给我）</summary><div id="dbgText">还没有事件</div></details>
 
   <div id="result" class="result" hidden></div>
 
@@ -76,13 +78,14 @@
       <li>请用 <b>Safari</b> 打开（微信内置浏览器、添加到主屏幕的网页版不能识别语音）。</li>
       <li>如提示“语音识别不可用”：设置 › 通用 › 键盘 › 打开「启用听写」（或打开 Siri）。</li>
       <li>第一次点录音会弹两次授权（麦克风、语音识别），都选允许。</li>
+      <li>语音识别整页只启动一次、一直开着：点一下开始一段，说完再点一下才执行（中间停下想想没关系）。如果提示“识别断了”，点一下就会重新开始；如果一直“好像没在听”，刷新页面。</li>
       <li>语音识别由 iOS 系统提供，可能会联网发给 Apple 处理；本页本身没有服务器，正文只存在本机浏览器里。</li>
     </ul>
   </section>
   <footer>拼音匹配使用 <a href="https://github.com/zh-lx/pinyin-pro" target="_blank" rel="noopener">pinyin-pro</a>（MIT）。</footer>
 </main>
 <script src="vendor/pinyin-pro.min.js"></script>
-<script src="commands.js?v=3"></script>
-<script src="app.js?v=3"></script>
+<script src="commands.js?v=4"></script>
+<script src="app.js?v=4"></script>
 </body>
 </html>
